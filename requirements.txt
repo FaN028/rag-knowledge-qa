@@ -1,0 +1,9 @@
+# 运行本项目所需的依赖
+# 在项目目录执行：pip install -r requirements.txt
+streamlit              # 网页界面
+openai                 # 调用 DeepSeek API
+numpy                  # 向量数学计算
+sentence-transformers  # embedding + rerank 模型
+pypdf                  # 解析 PDF 文档
+python-docx            # 解析 Word 文档
+modelscope             # 下载模型（国内镜像，只需下载时用）
