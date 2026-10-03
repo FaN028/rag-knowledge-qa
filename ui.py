@@ -3,6 +3,7 @@
 # ============================================================
 import streamlit as st
 
+import config
 from rag import model, chunk_text, extract_text
 from session import save_session, generate_session_name, load_sessions, load_session, delete_session
 
@@ -120,13 +121,13 @@ def render_sidebar() -> None:
             value=st.session_state.nick_name,
             placeholder="请输入昵称",
         )
-        st.session_state.nick_name = nick_name or "玥玥"
+        st.session_state.nick_name = nick_name or config.DEFAULT_NICK_NAME
 
         nature = st.text_input(
             "性格",
             value=st.session_state.nature,
             placeholder="请输入性格",
         )
-        st.session_state.nature = nature or "活泼开朗的姑娘"
+        st.session_state.nature = nature or config.DEFAULT_NATURE
 
         render_knowledge_panel()

@@ -70,8 +70,8 @@ def load_session(session_name: str) -> bool:
         with session_path.open("r", encoding="utf-8") as file:
             session_data = json.load(file)
 
-        st.session_state.nick_name = session_data.get("nick_name", "玥玥")
-        st.session_state.nature = session_data.get("nature", "活泼开朗的姑娘")
+        st.session_state.nick_name = session_data.get("nick_name", config.DEFAULT_NICK_NAME)
+        st.session_state.nature = session_data.get("nature", config.DEFAULT_NATURE)
         st.session_state.messages = session_data.get("messages", [])
         st.session_state.current_session = session_name
         return True

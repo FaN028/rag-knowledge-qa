@@ -83,10 +83,10 @@ def init_session_state() -> None:
         st.session_state.messages = []
 
     if "nick_name" not in st.session_state:
-        st.session_state.nick_name = "玥玥"
+        st.session_state.nick_name = config.DEFAULT_NICK_NAME
 
     if "nature" not in st.session_state:
-        st.session_state.nature = "活泼开朗的姑娘"
+        st.session_state.nature = config.DEFAULT_NATURE
 
     if "current_session" not in st.session_state:
         st.session_state.current_session = generate_session_name()
