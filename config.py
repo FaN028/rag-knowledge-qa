@@ -3,13 +3,13 @@
 # ============================================================
 from pathlib import Path
 
-APP_TITLE = "AI智能伴侣"
+APP_TITLE = "私有知识库 RAG 问答系统"
 SESSIONS_DIR = Path("sessions")
 LOGO_PATH = Path("resources/WLive48x48.png")
 
-# 默认昵称 / 性格（想改默认值，只改这里一处就行）
-DEFAULT_NICK_NAME = "玥玥"
-DEFAULT_NATURE = "活泼开朗的姑娘"
+# 默认昵称 / 性格
+DEFAULT_NICK_NAME = "小A"
+DEFAULT_NATURE = "活泼开朗的女生"
 
 DEEPSEEK_API_KEY_ENV = "DEEPSEEK_API_KEY"
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"

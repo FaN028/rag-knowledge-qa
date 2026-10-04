@@ -9,7 +9,7 @@
 #   2. python download_model.py       （运行本脚本，自动下载模型到 models/ 文件夹）
 #
 # 下载完成后，你的项目里会有 models/bge-small-zh-v1.5 这个文件夹，
-# 里面就是 embedding 模型，ai_partner_v4_vector.py 会自动从那里加载。
+# 里面就是 embedding 模型，rag.py 会自动从那里加载。
 
 from modelscope import snapshot_download
 

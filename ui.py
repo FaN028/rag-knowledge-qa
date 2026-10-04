@@ -114,7 +114,7 @@ def render_sidebar() -> None:
 
         st.divider()
 
-        st.subheader("伴侣信息")
+        st.subheader("助手信息")
 
         nick_name = st.text_input(
             "昵称",

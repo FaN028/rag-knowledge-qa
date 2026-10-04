@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# 阶段4：评测三种检索方法（关键词 / 向量 / 向量+rerank）
+# 评测三种检索方法（关键词 / 向量 / 向量+rerank）
 # 目标：用「命中率」这个数据，证明哪种检索更好。
 # 运行：./.venv/Scripts/python.exe evaluate.py
 import re
@@ -46,7 +46,7 @@ TOP_K = 3
 vectors = embed_model.encode(chunks)
 
 
-# —— 方法1：关键词检索（阶段1的逻辑）——
+# —— 方法1：关键词检索  ——
 def tokenize(text):
     text = text.lower()
     terms = re.findall(r"[a-z0-9]+", text)
