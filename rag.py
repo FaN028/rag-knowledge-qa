@@ -128,7 +128,7 @@ def build_context_block(query: str, chunks: list[str], vectors):
     context = (
         "下面是用户上传的\"知识库\"中，与本次问题最相关的片段：\n"
         "如果用户的问题与这些内容相关，请优先依据这些片段作答；\n"
-        "如果无关，请忽略它们，照常以伴侣身份聊天。\n\n"
+        "如果无关，请忽略它们，照常以知识库助手身份聊天。\n\n"
         + "\n\n".join(parts)
     )
     return context, selected
