@@ -11,6 +11,8 @@ from pydantic import BaseModel
 import config
 import knowledge
 from agent import run_agent
+from documents import chunk_text
+from embedding import encode
 from tools import add_knowledge, clear_knowledge, knowledge_info
 
 app = FastAPI(title=config.APP_TITLE, version="1.0.0")
@@ -27,12 +29,14 @@ app.add_middleware(
 
 @app.middleware("http")
 async def bind_client(request: Request, call_next):
-    """把请求头里的客户端标识写入上下文。
+    """把「本次请求用哪个知识库」写入上下文。
 
-    工具函数 search_knowledge 拿不到请求信息，只能通过上下文读取，
+    工具函数 search_knowledge 拿不到请求头，只能从上下文读取，
     这样不同客户端各自拥有独立的知识库。
+    注意这里绑定的是库本身而不是只是个 id：工具层不必再反查注册表。
     """
-    knowledge.set_current_client(request.headers.get("X-Client-Id"))
+    client_id = knowledge.normalize_client_id(request.headers.get("X-Client-Id"))
+    knowledge.bind_store(knowledge.get_store(client_id))
     return await call_next(request)
 
 SYSTEM_PROMPT = (
@@ -130,14 +134,11 @@ def chat(req: ChatRequest) -> ChatResponse:
 @app.post("/knowledge", response_model=KnowledgeResponse)
 def upload_knowledge(req: KnowledgeRequest) -> KnowledgeResponse:
     """把一份文本切块、向量化后加入服务端知识库。"""
-    # 延迟导入：rag 在导入时会加载 embedding 与 rerank 模型。
-    from rag import chunk_text, model
-
     chunks = chunk_text(req.content)
     if not chunks:
         raise HTTPException(status_code=400, detail="内容为空，未能切出任何片段。")
 
-    add_knowledge(chunks, model.encode(chunks), source=req.source)
+    add_knowledge(chunks, encode(chunks), source=req.source)
     return KnowledgeResponse(**knowledge_info())
 
 

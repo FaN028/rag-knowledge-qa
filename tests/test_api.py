@@ -2,9 +2,6 @@
 # test_api.py —— api.py 的接口测试：状态码、校验、序列化
 #               不联网、不加载 embedding 模型
 # ============================================================
-import sys
-from types import SimpleNamespace
-
 import pytest
 from fastapi.testclient import TestClient
 
@@ -105,12 +102,12 @@ def test_knowledge_status_starts_empty(client):
 def test_upload_knowledge_chunks_and_stores(client, monkeypatch):
     tools.clear_knowledge()
 
-    # 用假的 rag 模块替换真实模块，避免加载数百 MB 的 embedding 模型
-    fake_rag = SimpleNamespace(
-        chunk_text=lambda text: [text[i:i + 5] for i in range(0, len(text), 5)],
-        model=SimpleNamespace(encode=lambda chunks: [[0.0]] * len(chunks)),
+    # 切块与向量化是接口的两个外部依赖：前者要精确控制片段数，
+    # 后者要加载几百 MB 的 embedding 模型。都在这里替掉。
+    monkeypatch.setattr(
+        api, "chunk_text", lambda text: [text[i:i + 5] for i in range(0, len(text), 5)]
     )
-    monkeypatch.setitem(sys.modules, "rag", fake_rag)
+    monkeypatch.setattr(api, "encode", lambda chunks: [[0.0]] * len(chunks))
 
     response = client.post(
         "/knowledge",
@@ -125,11 +122,8 @@ def test_upload_knowledge_chunks_and_stores(client, monkeypatch):
 
 def test_upload_knowledge_rejects_empty_content(client, monkeypatch):
     tools.clear_knowledge()
-    fake_rag = SimpleNamespace(
-        chunk_text=lambda _text: [],
-        model=SimpleNamespace(encode=lambda chunks: [[0.0]] * len(chunks)),
-    )
-    monkeypatch.setitem(sys.modules, "rag", fake_rag)
+    monkeypatch.setattr(api, "chunk_text", lambda _text: [])
+    monkeypatch.setattr(api, "encode", lambda chunks: [[0.0]] * len(chunks))
 
     response = client.post("/knowledge", json={"source": "empty.md", "content": "   "})
 
@@ -148,11 +142,8 @@ def test_delete_knowledge_clears_store(client):
 def test_knowledge_is_isolated_between_clients(client, monkeypatch):
     """不同 X-Client-Id 应看到各自的知识库，互不干扰。"""
     tools.clear_knowledge()
-    fake_rag = SimpleNamespace(
-        chunk_text=lambda text: [text],
-        model=SimpleNamespace(encode=lambda chunks: [[0.0]] * len(chunks)),
-    )
-    monkeypatch.setitem(sys.modules, "rag", fake_rag)
+    monkeypatch.setattr(api, "chunk_text", lambda text: [text])
+    monkeypatch.setattr(api, "encode", lambda chunks: [[0.0]] * len(chunks))
 
     client.post(
         "/knowledge",

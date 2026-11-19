@@ -4,7 +4,9 @@
 import streamlit as st
 import config
 
-# 必须最先调用（在导入 rag 之前，因为 rag 会在导入时就加载模型）
+# set_page_config 必须是第一个 Streamlit 命令。
+# 注意它不再需要抢在"导入模型"之前：模型改成懒加载（embedding.py），
+# 导入任何模块都不会加载权重，import 顺序不再是隐式契约。
 st.set_page_config(
     page_title=config.APP_TITLE,
     page_icon="🤖",
@@ -14,12 +16,15 @@ st.set_page_config(
 )
 
 import os
+import uuid
 from typing import Iterator
 
 from openai import OpenAI
 
 from session import generate_session_name, save_session
-from rag import build_context_block, model
+import embedding
+import knowledge
+import retrieval
 from agent import run_agent, save_trace
 import ui
 
@@ -124,40 +129,20 @@ def init_session_state() -> None:
     if "current_session" not in st.session_state:
         st.session_state.current_session = generate_session_name()
 
-    # —— 知识库相关的状态 ——
-    # 首次进入会话时，先尝试把「服务端已预置的知识库」装进会话状态。
-    # 知识库模式读的是 session_state，不会自动读服务端那份；
-    # 演示实例就是靠这一步让访客打开就能提问（否则永远是空库）。
-    if "knowledge_chunks" not in st.session_state:
-        preset_chunks, preset_vectors, preset_sources = [], [], []
-        try:
-            import knowledge
+    # —— 知识库：每个界面会话一份内存库 ——
+    # 以前数据的"真相"是 session_state 里的两个 list，检索要另写一遍余弦；
+    # 现在直接用一个 KnowledgeBase（和 HTTP 接口同一个类、同一段检索代码），
+    # 只是不落盘：访客之间互相看不见，刷新即清空。
+    if "kb" not in st.session_state:
+        st.session_state.kb = knowledge.session_store(f"ui_{uuid.uuid4().hex[:8]}")
+    if "memory" not in st.session_state:
+        st.session_state.memory = knowledge.session_store(f"mem_{uuid.uuid4().hex[:8]}")
 
-            store = knowledge.get_store()
-            # 注意：chunks / vectors / sources 都是 @property，不是方法
-            preset_chunks = list(store.chunks)
-            preset_vectors = list(store.vectors)
-            preset_sources = list(store.sources)
-        except Exception:
-            # 预置库不可用不该影响正常上传流程，静默降级为空
-            preset_chunks, preset_vectors, preset_sources = [], [], []
-        st.session_state.knowledge_chunks = list(preset_chunks)
-        st.session_state.knowledge_vectors = list(preset_vectors)
-        st.session_state.knowledge_sources = list(preset_sources)
-    if "knowledge_vectors" not in st.session_state:
-        st.session_state.knowledge_vectors = []
-    if "knowledge_sources" not in st.session_state:
-        st.session_state.knowledge_sources = []
+    # 纯界面状态：上传去重用的文件指纹、清空后刷新上传组件的计数器
     if "knowledge_ids" not in st.session_state:
         st.session_state.knowledge_ids = set()
     if "knowledge_clear_counter" not in st.session_state:
         st.session_state.knowledge_clear_counter = 0
-
-    # —— 记忆（多轮对话记忆）相关状态 ——
-    if "memory_chunks" not in st.session_state:
-        st.session_state.memory_chunks = []
-    if "memory_vectors" not in st.session_state:
-        st.session_state.memory_vectors = []
 
     # —— 对话模式：知识库模式（默认，和原先一样）/ Agent 模式（模型自己决定调不调工具）——
     if "chat_mode" not in st.session_state:
@@ -169,6 +154,11 @@ def main() -> None:
     st.title(config.APP_TITLE)
 
     init_session_state()
+
+    # 告诉工具层：这次脚本运行用的是本会话的知识库。
+    # Agent 模式的 search_knowledge 靠它看到用户刚上传的文档——
+    # 重构前它去读 session_state，一旦被 HTTP 调用就查不到同一份数据。
+    knowledge.bind_store(st.session_state.kb)
 
     if config.LOGO_PATH.exists():
         st.logo(str(config.LOGO_PATH))
@@ -192,9 +182,9 @@ def main() -> None:
         "content": prompt,
     })
 
-    # 把用户这句话也存进"长期记忆"
-    st.session_state.memory_chunks.append(prompt)
-    st.session_state.memory_vectors.append(model.encode(prompt))
+    # 本轮查询向量只算一次：记忆检索、知识库检索、记忆入库共用同一个向量。
+    # 重构前一轮对话 encode 三次（记忆入库一次、知识库一次、记忆一次）。
+    query_vector = embedding.encode(prompt)
 
     system_prompt = build_system_prompt(
         st.session_state.nick_name,
@@ -204,26 +194,31 @@ def main() -> None:
     # Agent 模式：本轮交由 agent.run_agent 处理，处理完直接返回。
     # history 排除本轮提问——它作为 user_query 单独传入，否则会重复。
     if st.session_state.chat_mode == config.MODE_AGENT:
+        st.session_state.memory.add([prompt], [query_vector])
         run_agent_turn(client, prompt, system_prompt, st.session_state.messages[:-1])
         return
 
-    # 知识库模式：先检索知识库，再流式生成回答。
-    context, cited = build_context_block(
+    # —— 知识库模式 ——
+    # 记忆要在"存入本句"之前查：先存再查的话，本句与自己的相似度是 1.0，
+    # 每次都会占掉一个召回名额，等于少检索一条真实的历史。
+    memory_context, _ = retrieval.build_context(
         prompt,
-        st.session_state.knowledge_chunks,
-        st.session_state.knowledge_vectors,
+        st.session_state.memory.search,
+        query_vector=query_vector,
+        instruction=retrieval.MEMORY_INSTRUCTION,
     )
-    # 检索历史记忆
-    memory_context, _ = build_context_block(
+    st.session_state.memory.add([prompt], [query_vector])
+
+    context, cited = retrieval.build_context(
         prompt,
-        st.session_state.memory_chunks,
-        st.session_state.memory_vectors,
+        st.session_state.kb.search,
+        query_vector=query_vector,
     )
 
+    if memory_context:
+        system_prompt = system_prompt + "\n\n" + memory_context
     if context:
         system_prompt = system_prompt + "\n\n" + context
-    if memory_context:
-        system_prompt = system_prompt + "\n\n【你的记忆】之前聊过的相关内容：\n" + memory_context
 
     request_messages = [
         {

@@ -4,7 +4,8 @@
 import streamlit as st
 
 import config
-from rag import model, chunk_text, extract_text
+import documents
+import embedding
 from session import save_session, generate_session_name, load_sessions, load_session, delete_session
 
 
@@ -22,6 +23,9 @@ def render_knowledge_panel() -> None:
     st.divider()
     st.subheader("知识库（RAG）")
 
+    # 本会话的知识库（内存库，见 app.init_session_state）
+    kb = st.session_state.kb
+
     uploader_key = f"knowledge_uploader_{st.session_state.knowledge_clear_counter}"
     uploaded_files = st.file_uploader(
         "上传文档作为知识库",
@@ -33,38 +37,33 @@ def render_knowledge_panel() -> None:
     if uploaded_files:
         for uploaded in uploaded_files:
             raw = uploaded.read()
+            # 用"文件名+字节数"当指纹，防止 Streamlit 每次重跑都重复入库
             file_id = f"{uploaded.name}:{len(raw)}"
             if file_id in st.session_state.knowledge_ids:
                 continue
 
-            text = extract_text(uploaded.name, raw)
-            if text is None:
+            try:
+                text = documents.extract_text(uploaded.name, raw)
+            except documents.DocumentError as exc:
+                st.warning(str(exc))
                 continue
 
-            new_chunks = chunk_text(text)
+            new_chunks = documents.chunk_text(text)
             if not new_chunks:
                 st.warning(f"《{uploaded.name}》没有可用的文字内容。")
                 continue
 
-            new_vectors = model.encode(new_chunks)
-
-            st.session_state.knowledge_chunks.extend(new_chunks)
-            st.session_state.knowledge_vectors.extend(new_vectors)
-            st.session_state.knowledge_sources.append(uploaded.name)
+            kb.add(new_chunks, embedding.encode(new_chunks), source=uploaded.name)
             st.session_state.knowledge_ids.add(file_id)
             st.success(f"已导入《{uploaded.name}》，切成 {len(new_chunks)} 个片段。")
 
-    st.caption(
-        f"当前知识库：{len(st.session_state.knowledge_sources)} 个文档，"
-        f"{len(st.session_state.knowledge_chunks)} 个片段"
-    )
-    if st.session_state.knowledge_sources:
-        st.caption("已导入：" + "、".join(st.session_state.knowledge_sources))
+    sources = kb.sources
+    st.caption(f"当前知识库：{len(sources)} 个文档，{kb.count()} 个片段")
+    if sources:
+        st.caption("已导入：" + "、".join(sources))
 
     if st.button("清空知识库", width="stretch", icon="🗑️"):
-        st.session_state.knowledge_chunks = []
-        st.session_state.knowledge_vectors = []
-        st.session_state.knowledge_sources = []
+        kb.clear()
         st.session_state.knowledge_ids = set()
         st.session_state.knowledge_clear_counter += 1
         st.rerun()

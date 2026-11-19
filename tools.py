@@ -6,13 +6,18 @@ from datetime import datetime
 
 import config
 import knowledge
+import retrieval
 
 # ============================================================
-# 知识库来源：界面模式读 Streamlit 会话，HTTP 模式读服务端存储
-# （服务端存储按客户端隔离，并落盘到 config.KNOWLEDGE_DIR）
+# 知识库工具：数据在哪个后端由 knowledge 决定，这里只调接口
+#
+# 工具层不该知道"界面"和"HTTP"的区别。重构前这里会去读 Streamlit 的
+# session_state，失败再 try/except 吞掉——一段代码猜两种运行环境，
+# 三种调用方（界面 / Agent / 接口）就各自长出补丁。
+# 现在入口层用 knowledge.bind_store() 指明用哪个库，这里只管用。
 # ============================================================
 def add_knowledge(chunks: list, vectors, source: str = "") -> int:
-    """向服务端知识库追加片段与向量并立即落盘，返回追加后的片段总数。"""
+    """向当前知识库追加片段与向量并立即落盘，返回追加后的片段总数。"""
     store = knowledge.get_store()
     total = store.add(chunks, vectors, source)
     store.save()
@@ -20,36 +25,13 @@ def add_knowledge(chunks: list, vectors, source: str = "") -> int:
 
 
 def clear_knowledge() -> None:
-    """清空服务端知识库（含已落盘文件）。"""
+    """清空当前知识库（落盘库会一并删掉磁盘数据）。"""
     knowledge.get_store().clear()
 
 
 def knowledge_info() -> dict:
-    """返回服务端知识库的当前状态。"""
+    """返回当前知识库的状态。"""
     return knowledge.get_store().info()
-
-
-def _resolve_knowledge():
-    """取当前可用的知识库视图：(chunks, vectors, searcher)。
-
-    - 界面模式：数据在 Streamlit 会话状态里，直接返回 (chunks, vectors, None)；
-    - 服务端模式：数据在向量库后端里，只交出 searcher，避免把全量片段与
-      向量搬进内存——这正是换成 Chroma 后端后省掉的那部分开销。
-    """
-    try:
-        import streamlit as st
-
-        chunks = st.session_state.knowledge_chunks
-        vectors = st.session_state.knowledge_vectors
-        if len(chunks) > 0 and len(vectors) > 0:
-            return chunks, vectors, None
-    except Exception:
-        pass
-
-    store = knowledge.get_store()
-    if not store.ready:
-        return None, None, None
-    return None, None, store.search
 
 
 def search_knowledge(query: str) -> str:
@@ -57,19 +39,12 @@ def search_knowledge(query: str) -> str:
 
     返回拼接后的原文片段；知识库为空或未命中时返回提示文本。
     """
-    chunks, vectors, searcher = _resolve_knowledge()
-    # 先判断知识库是否为空：为空时直接返回，避免白白加载数百 MB 的检索模型。
-    if searcher is None and (not chunks or not vectors):
+    store = knowledge.get_store()
+    # 先判断是否为空：空库直接返回，避免白白加载几百 MB 的 embedding 模型
+    if not store.ready:
         return "知识库中还没有内容。"
 
-    # 延迟导入：rag 模块在导入时即加载 embedding 与 rerank 模型，
-    # 置于模块顶层会使本文件无法脱离模型独立导入与测试。
-    try:
-        from rag import build_context_block
-    except Exception:
-        return "检索组件尚未就绪。"
-
-    _, selected = build_context_block(query, chunks, vectors, searcher=searcher)
+    _, selected = retrieval.build_context(query, store.search)
     if not selected:
         return "知识库中没有找到相关内容。"
 

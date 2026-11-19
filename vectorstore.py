@@ -337,13 +337,17 @@ class ChromaVectorStore:
 # ============================================================
 # 工厂：按配置挑后端
 # ============================================================
-def build_store(client_id: str, directory: Path):
-    """根据 config.VECTOR_BACKEND 创建后端实例。
+def build_store(client_id: str, directory: Path, backend: str | None = None):
+    """创建后端实例。
 
     - numpy（默认）：零依赖，全量扫描
     - chroma：HNSW 检索；未安装依赖时按 auto 语义回退到 numpy
+    - auto：装了 chromadb 就用 chroma，否则 numpy
+
+    backend 显式传入时优先于 config.VECTOR_BACKEND：界面会话的临时库
+    需要固定用 numpy，不受全局配置影响。
     """
-    backend = (config.VECTOR_BACKEND or "numpy").strip().lower()
+    backend = (backend or config.VECTOR_BACKEND or "numpy").strip().lower()
 
     if backend in ("chroma", "auto"):
         try:
