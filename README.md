@@ -310,7 +310,7 @@ curl -X POST http://127.0.0.1:8000/chat \
 测试按「快 / 慢」两层分开，默认只跑快的那层：
 
 ```bash
-pytest                  # 79 个用例，不联网、不加载模型，约 4 秒
+pytest                  # 81 个用例，不联网、不加载模型，约 5 秒
 pytest -m slow          # 5 个用例，加载真实 bge 模型验检索质量，约 70 秒
 ```
 
@@ -324,6 +324,7 @@ pytest -m slow          # 5 个用例，加载真实 bge 模型验检索质量�
 | `tests/test_knowledge.py`       | 按客户端隔离、落盘后恢复、清空时删除磁盘文件、客户端标识的安全规范化                              |
 | `tests/test_vectorstore.py`     | 双后端行为一致性：Top-N 顺序、维度和数量不匹配时报错、落盘/重开恢复、清空删文件（Chroma 用例在未装依赖时跳过） |
 | `tests/test_documents.py`       | 切块（长度、重叠、空白归一化）、txt/md/docx/pdf 解析、不支持的后缀与损坏文件的报错文案             |
+| `tests/test_demo.py`            | 演示知识库：三份示例文档写入、已有内容时不覆盖用户文档                          |
 | `tests/test_retrieval.py`       | 单一检索路径：rerank 重排顺序、粗排候选数、查询向量复用（不重复 encode）、记忆/知识库提示词不串味、内存库不进全局注册表、依赖链不 import Streamlit |
 | `tests/test_retrieval_quality.py` | **慢测试**：语义检索命中率 ≥ 90%、rerank 不劣化召回、语义优于关键词、返回条数不超过 Top-K；缺模型时自动跳过 |
 
@@ -444,21 +445,28 @@ docker run --rm -p 8000:8000 --env-file .env rag-agent
 
 | 改动类型 | 文件 |
 |---|---|
-| 新增 | `documents.py`、`embedding.py`、`retrieval.py` |
-| 删除 | `rag.py` |
-| 改动 | `app.py`、`ui.py`、`api.py`、`tools.py`、`knowledge.py`、`vectorstore.py`、`evaluate.py`、`README.md`、`tests/` |
+| 新增 | `documents.py`、`embedding.py`、`retrieval.py`、`demo.py` |
+| 删除 | `rag.py`、`seed_demo.py`（演示数据改成会话级预置，见下） |
+| 改动 | `app.py`、`ui.py`、`api.py`、`tools.py`、`knowledge.py`、`vectorstore.py`、`evaluate.py`、`config.py`、`README.md`、`tests/` |
 
 没有新增任何第三方依赖，`requirements.txt` 不用动。但**只传 `app.py` 会直接报 `ModuleNotFoundError: documents`**——三个新模块是独立文件，不是塞进 `app.py` 的函数。
 
 上传方式任选其一：整包 zip，或在创空间里 `git pull`（创空间的代码本来就是一份 git 仓库）。
 
+### 演示知识库为什么要改成会话级
+
+以前是在构建镜像时跑 `seed_demo.py`，把三份示例文档写进**默认客户端的共享落盘库**，界面再把那份库塞进 `session_state`。两个毛病：所有访客共用一份，一个人点「清空」演示数据就没了；而且这份数据走的入库路径和界面上传走的不是同一条，正是重构前「两套检索」的来源之一。
+
+现在设 `RAG_DEMO_KB=1`（创空间的变量管理里配），每个会话初始化时 `demo.seed()` 把示例文档写进**该会话自己的内存库**，走的是和界面上传完全相同的 `chunk_text → encode → add`。用户自己传了文档就不再灌示例（`kb.ready` 为真时跳过），彼此也不会互相覆盖。
+
 部署后按这个顺序校验：
 
 1. 构建日志里出现 `You can now view your Streamlit app`，且没有 `ModuleNotFoundError` / `ImportError`。
-2. 首屏正常渲染，侧边栏知识库面板显示 0 个片段（而不是报错）。
-3. 上传一个 txt，片段计数变成 1；提问能被引用到——这条同时验证了 `documents` / `embedding` / `retrieval` 三个新模块都在。
-4. 清空知识库后再提问，回答应该是「知识库中还没有内容。」——这是重构后才会有的明确提示。
-5. 环境变量里必须有 `DEEPSEEK_API_KEY`（在创空间的变量管理里配，不要写进代码）；实例内存吃紧时再加 `RAG_RERANK=0` 关掉精排（rerank 模型常驻约 1.5GB，关掉后只做向量粗排）。
+2. **侧栏顶部显示 `v2.0.0`**——版本号写在 `config.VERSION` 里，看一眼就知道线上跑的是不是新代码。
+3. 首屏知识库面板显示 3 个文档 / 约 3 个片段（演示数据已灌入）。直接问「年假有几天」应该能答出来并给出引用片段。
+4. 上传一个 txt，片段计数增加；提问能被引用到——这条同时验证了 `documents` / `embedding` / `retrieval` 三个新模块都在。
+5. 清空知识库后再提问，回答应该是「知识库中还没有内容。」——这是重构后才会有的明确提示。
+6. 环境变量里必须有 `DEEPSEEK_API_KEY`（在创空间的变量管理里配，不要写进代码）；演示数据要显式打开 `RAG_DEMO_KB=1`；实例内存吃紧时再加 `RAG_RERANK=0` 关掉精排（rerank 模型常驻约 1.5GB，关掉后只做向量粗排）。
 
 > **最容易踩的坑：模型文件。** `models/` 在 `.gitignore` 里、不进仓库，而 `config.MODEL_PATH` / `config.RERANK_MODEL_PATH` 指向的就是这个相对目录。上次部署能用，说明权重是随包带上去的——整包重新上传时请确认 `models/` 仍在包里，否则首次上传文档才会暴露「找不到模型」。
 
@@ -497,6 +505,7 @@ ai/
 ├── config.py                 # 所有常量
 ├── session.py                # 会话管理
 ├── documents.py              # 文档解析（txt/md/pdf/docx）+ 切块，纯函数
+├── demo.py                   # 演示用示例知识库（RAG_DEMO_KB=1 时每个会话预置）
 ├── embedding.py              # embedding / rerank 模型的懒加载单例
 ├── retrieval.py              # 唯一一条检索链路：粗排 → rerank → 拼上下文
 ├── ui.py                     # 界面（聊天记录、知识库面板、侧边栏）
@@ -517,6 +526,7 @@ ai/
 │   ├── test_knowledge.py     #   客户端隔离 + 落盘恢复
 │   ├── test_vectorstore.py   #   双后端行为一致性
 │   ├── test_documents.py     #   切块与文档解析
+│   ├── test_demo.py          #   演示知识库预置
 │   ├── test_retrieval.py     #   单一检索路径 + 依赖方向约束
 │   └── test_retrieval_quality.py  # 检索质量回归（slow，需本地模型）
 ├── pytest.ini                # pytest 配置

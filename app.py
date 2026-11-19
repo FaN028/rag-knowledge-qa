@@ -22,6 +22,7 @@ from typing import Iterator
 from openai import OpenAI
 
 from session import generate_session_name, save_session
+import demo
 import embedding
 import knowledge
 import retrieval
@@ -135,6 +136,10 @@ def init_session_state() -> None:
     # 只是不落盘：访客之间互相看不见，刷新即清空。
     if "kb" not in st.session_state:
         st.session_state.kb = knowledge.session_store(f"ui_{uuid.uuid4().hex[:8]}")
+        # 演示环境（创空间）预置三份示例文档，访问者一进来就能直接提问。
+        # 写的是本会话自己的内存库，别人点「清空」不影响你。
+        if config.DEMO_KB:
+            demo.seed(st.session_state.kb)
     if "memory" not in st.session_state:
         st.session_state.memory = knowledge.session_store(f"mem_{uuid.uuid4().hex[:8]}")
 

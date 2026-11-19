@@ -10,6 +10,13 @@ from zoneinfo import ZoneInfo
 TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 APP_TITLE = "私有知识库 RAG + Agent 问答系统"
+# 版本号：侧栏会显示它。部署到创空间后，看一眼版本号就知道线上跑的是哪一版，
+# 不用再靠「猜新代码有没有生效」。
+VERSION = "2.0.0"
+
+# 演示知识库：打开后每个会话初始化时塞入 demo.SAMPLES 里的示例文档。
+# 创空间设 RAG_DEMO_KB=1；本地开发和测试保持关闭。
+DEMO_KB = os.getenv("RAG_DEMO_KB", "0").strip().lower() in ("1", "true", "yes")
 SESSIONS_DIR = Path("sessions")
 KNOWLEDGE_DIR = Path("data/knowledge")   # 服务端知识库落盘目录（按客户端分文件夹）
 LOGO_PATH = Path("resources/WLive48x48.png")

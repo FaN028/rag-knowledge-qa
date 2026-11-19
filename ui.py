@@ -73,6 +73,8 @@ def render_sidebar() -> None:
     """渲染左侧控制面板。"""
     with st.sidebar:
         st.subheader("AI控制面板")
+        # 版本号：线上（创空间）跑的是哪一版，一看便知
+        st.caption(f"v{config.VERSION}")
 
         if st.button("新建会话", width="stretch", icon="🖊️"):
             save_session()
