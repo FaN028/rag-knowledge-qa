@@ -40,6 +40,11 @@ services:
   ui:
     image: rag-agent:latest
     container_name: rag-ui
+    # 镜像里烤死的 HEALTHCHECK 探的是 8000（API 端口），而 ui 跑的是 8501，
+    # 容器内没有进程监听 8000，检查永远失败 → 状态恒为 unhealthy。
+    # 服务本身正常，这里显式关掉继承来的检查，避免误判。
+    healthcheck:
+      disable: true
     depends_on:
       api:
         condition: service_healthy
