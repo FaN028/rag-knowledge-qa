@@ -19,6 +19,7 @@
 - **HTTP 接口服务** —— 以 FastAPI 暴露 `POST /chat`、`POST /knowledge` 等接口，同一套调度逻辑可供任意前端调用
 - **多客户端隔离与知识库持久化** —— 请求头 `X-Client-Id` 区分各自的知识库，数据落盘后服务重启自动恢复
 - **向量存储可切换** —— 一套接口两种后端：Chroma（HNSW 近似最近邻 + 持久化）/ NumPy（全量扫描，零依赖降级），换后端不动调用方代码
+- **单一检索链路** —— 界面、HTTP 接口、评测脚本调的是同一个 `retrieval.build_context()`，不存在「演示一套、线上另一套」；评测表里的命中率就是生产代码跑出来的
 - **容器化运行** —— 两阶段构建、非 root 运行、`/health` 就绪探针、`docker compose` 一条命令拉起 API 与界面；镜像 5.4GB，已在本地完整实测（见「实测结果」）
 
 ## 🎬 效果演示
@@ -133,6 +134,33 @@ curl http://127.0.0.1:8000/knowledge -H "X-Client-Id: alice"
 > **关键点：执行工具的始终是本地 Python 代码，模型只输出"调用请求"文本。**
 > 单轮最多允许 5 次循环（`MAX_ROUNDS` 护栏），防止模型不收敛导致请求失控。
 
+### ③ 一次提问，代码是怎么走的
+
+界面和接口只负责「选哪个库」和「怎么渲染」，检索本身只有一条路径：
+
+```
+app.py:187    query_vector = embedding.encode(prompt)        ← 一轮只 encode 一次
+     ↓
+app.py:212    retrieval.build_context(prompt, kb.search)     ← 界面：会话内存库
+tools.py:47   retrieval.build_context(query, store.search)   ← Agent 工具：绑定的库
+     ↓
+retrieval.py:77  build_context()  →  retrieval.py:34  retrieve()
+     ↓  searcher(query_vector, config.RERANK_TOP_N)
+knowledge.py:122 KnowledgeBase.search()
+     ↓
+vectorstore.py:136  NumpyVectorStore.query()   或   vectorstore.py:315  ChromaVectorStore.query()
+     ↓
+embedding.py:36  get_reranker() 有模型就精排，没有就按粗排顺序取 TOP_K
+```
+
+三件事因此变得确定：
+
+- **只有一条检索实现**。`build_context` 只认「一个查询向量 + 一个 searcher 函数」，不关心底下是 NumPy 全量扫描还是 Chroma 的 HNSW。界面和 HTTP 调的是同一个函数，排序规则、并列分数的处理方式不可能再分叉。
+- **谁用哪个库由入口层决定**。界面绑一个随会话创建、不落盘的内存库（`app.py:137`），HTTP 按 `X-Client-Id` 绑各自的落盘库（`api.py:39`）。工具层只调 `knowledge.get_store()`，不需要知道 Streamlit 存在。
+- **记忆和知识库共用同一个查询向量，但用两份不同的提示词**（`MEMORY_INSTRUCTION` / `KB_INSTRUCTION`），不会再把往日对话标成「知识库资料」。
+
+上传文档时走另一条纯函数链：`ui.py:56` → `documents.extract_text()`（`documents.py:49`）→ `documents.chunk_text()`（`documents.py:22`）→ `embedding.encode()` → `KnowledgeBase.add()`。
+
 ## 🔧 Agent 工具清单
 
 | 工具               | 作用                         | 说明                                  |
@@ -189,6 +217,8 @@ curl http://127.0.0.1:8000/knowledge -H "X-Client-Id: alice"
 ## 📊 评测结果
 
 自建 10 题测试集，检索命中率（Top3）：
+
+> 三种方法**都不是另写的平行实现**：向量与 rerank 两列直接调 `retrieval.retrieve()`（`evaluate.py` 把 10 个片段装进一个 `NumpyVectorStore`，再走生产链路），所以表里的数字就是线上代码的表现。只有关键词检索是自己实现的对照组——它本来就不在生产代码里，作用是给向量检索一个基线。
 
 | 检索方法      | 命中率   |
 |---------------|----------|
@@ -280,7 +310,7 @@ curl -X POST http://127.0.0.1:8000/chat \
 测试按「快 / 慢」两层分开，默认只跑快的那层：
 
 ```bash
-pytest                  # 54 个用例，不联网、不加载模型，约 8 秒
+pytest                  # 76 个用例，不联网、不加载模型，约 4 秒
 pytest -m slow          # 5 个用例，加载真实 bge 模型验检索质量，约 70 秒
 ```
 
@@ -293,6 +323,8 @@ pytest -m slow          # 5 个用例，加载真实 bge 模型验检索质量�
 | `tests/test_api.py`             | `/health`；`/chat` 的正常分支与 422 / 502 / 503 错误分支；`/knowledge` 增删查、跨客户端隔离、CORS |
 | `tests/test_knowledge.py`       | 按客户端隔离、落盘后恢复、清空时删除磁盘文件、客户端标识的安全规范化                              |
 | `tests/test_vectorstore.py`     | 双后端行为一致性：Top-N 顺序、维度和数量不匹配时报错、落盘/重开恢复、清空删文件（Chroma 用例在未装依赖时跳过） |
+| `tests/test_documents.py`       | 切块（长度、重叠、空白归一化）、txt/md/docx/pdf 解析、不支持的后缀与损坏文件的报错文案             |
+| `tests/test_retrieval.py`       | 单一检索路径：rerank 重排顺序、粗排候选数、查询向量复用（不重复 encode）、记忆/知识库提示词不串味、内存库不进全局注册表、依赖链不 import Streamlit |
 | `tests/test_retrieval_quality.py` | **慢测试**：语义检索命中率 ≥ 90%、rerank 不劣化召回、语义优于关键词、返回条数不超过 Top-K；缺模型时自动跳过 |
 
 > 慢测试的题集与 `evaluate.py` 共用同一份数据（`CHUNKS` / `TESTS`），不重复维护。`evaluate.py` 负责「打印对比表给人看」，慢测试负责「断言质量没退化」——脚本改坏了会红，表格也就不会假。
@@ -404,27 +436,58 @@ docker run --rm -p 8000:8000 --env-file .env rag-agent
 
 > 说明：以上为**本地容器化**的验证结果，未部署到公网。依赖已在 `requirements.txt` 中锁定版本（除 torch 由 Dockerfile 单独装 CPU 版），上面这轮构建即是用锁定版本跑出来的。
 
+### 魔搭创空间（在线演示）
+
+线上演示跑在魔搭创空间：`modelscope.cn/studios/fys040208/rag-knowledge-qa`，类型是 Streamlit 创空间。它和 Docker 部署的唯一区别是：**入口固定为根目录的 `app.py`，依赖从 `requirements.txt` 装，Dockerfile 不参与**。
+
+所以仓库根必须保持扁平——`app.py` 在最外层，各模块与它同级，不建 Python package。这次重构遵守了这条，代价是所有改动都要整包重新上传：
+
+| 改动类型 | 文件 |
+|---|---|
+| 新增 | `documents.py`、`embedding.py`、`retrieval.py` |
+| 删除 | `rag.py` |
+| 改动 | `app.py`、`ui.py`、`api.py`、`tools.py`、`knowledge.py`、`vectorstore.py`、`evaluate.py`、`README.md`、`tests/` |
+
+没有新增任何第三方依赖，`requirements.txt` 不用动。但**只传 `app.py` 会直接报 `ModuleNotFoundError: documents`**——三个新模块是独立文件，不是塞进 `app.py` 的函数。
+
+上传方式任选其一：整包 zip，或在创空间里 `git pull`（创空间的代码本来就是一份 git 仓库）。
+
+部署后按这个顺序校验：
+
+1. 构建日志里出现 `You can now view your Streamlit app`，且没有 `ModuleNotFoundError` / `ImportError`。
+2. 首屏正常渲染，侧边栏知识库面板显示 0 个片段（而不是报错）。
+3. 上传一个 txt，片段计数变成 1；提问能被引用到——这条同时验证了 `documents` / `embedding` / `retrieval` 三个新模块都在。
+4. 清空知识库后再提问，回答应该是「知识库中还没有内容。」——这是重构后才会有的明确提示。
+5. 环境变量里必须有 `DEEPSEEK_API_KEY`（在创空间的变量管理里配，不要写进代码）；实例内存吃紧时再加 `RAG_RERANK=0` 关掉精排（rerank 模型常驻约 1.5GB，关掉后只做向量粗排）。
+
+> **最容易踩的坑：模型文件。** `models/` 在 `.gitignore` 里、不进仓库，而 `config.MODEL_PATH` / `config.RERANK_MODEL_PATH` 指向的就是这个相对目录。上次部署能用，说明权重是随包带上去的——整包重新上传时请确认 `models/` 仍在包里，否则首次上传文档才会暴露「找不到模型」。
+
 ## 🧩 架构分层
 
-调度逻辑层（`agent.py`）**不依赖任何界面框架**：
+分层不靠自觉，靠一条可以自动检查的规则：**除界面侧三个文件（`app.py` / `ui.py` / `session.py`）外，任何模块都不许 `import streamlit`**，`tests/test_retrieval.py` 里有一条用例扫全仓源码来守这条规则。
 
 ```
-app.py（界面层）    run_agent_turn()  → 渲染回答 / 存会话 / 落盘 / 轨迹面板
-api.py（接口层）    chat()            → 校验请求 / 返回 JSON
-                            ↓ 两者调用同一个函数
-agent.py（逻辑层）  run_agent()       → 多轮循环 / 派发工具 / 两级兜底
-                            ↓ 调用
-tools.py（工具层）  TOOLS / TOOL_SCHEMAS / 知识库来源
-                            ↓ 读取
-knowledge.py        KnowledgeBase     → 按客户端隔离 / 懒加载后端
-                            ↓ 委托
-vectorstore.py      双后端            → Chroma（HNSW）/ NumPy（全量扫描）
+入口层   app.py / api.py        选哪个知识库、怎么渲染、怎么校验请求
+          ↓
+逻辑层   agent.py               多轮循环 / 派发工具 / 两级兜底（不依赖界面框架）
+          ↓
+工具层   tools.py               TOOLS / TOOL_SCHEMAS，只收发纯数据
+          ↓
+检索层   retrieval.py           唯一一条检索链路：粗排 → rerank → 拼上下文
+         embedding.py           模型的懒加载单例（谁需要谁调，不在 import 时加载）
+          ↓
+知识库   knowledge.py           KnowledgeBase：按库隔离 / 是否落盘 / 懒加载后端
+          ↓
+存储层   vectorstore.py         双后端：Chroma（HNSW）/ NumPy（全量扫描）
 ```
 
-因为逻辑层不引用 Streamlit，所以同一套调度逻辑：
+`documents.py`（解析 + 切块）是纯函数，谁都能调，不参与上面这条纵向链。
 
-- 可在终端直接单元测试（无需启动界面）
-- 已被 Streamlit 界面与 FastAPI 接口同时复用，接入时未改动 `agent.py` 一行
+因为逻辑层和检索层都不引用 Streamlit，同一套代码可以：
+
+- 在终端直接单元测试（`pytest` 不启动界面、不加载模型，4 秒跑完）
+- 被 Streamlit 界面与 FastAPI 接口同时复用，接入时未改动 `agent.py` 一行
+- 被 `evaluate.py` / `benchmark_vector.py` 当库调用，评测的和生产的是同一份实现
 
 ## 📁 目录结构
 
@@ -433,7 +496,9 @@ ai/
 ├── app.py                    # 程序入口（页面配置 + AI 调用 + 主程序）
 ├── config.py                 # 所有常量
 ├── session.py                # 会话管理
-├── rag.py                    # RAG：模型加载 + 切块 + 检索 + 注入
+├── documents.py              # 文档解析（txt/md/pdf/docx）+ 切块，纯函数
+├── embedding.py              # embedding / rerank 模型的懒加载单例
+├── retrieval.py              # 唯一一条检索链路：粗排 → rerank → 拼上下文
 ├── ui.py                     # 界面（聊天记录、知识库面板、侧边栏）
 ├── api.py                    # FastAPI 服务：HTTP 接口（/chat、/knowledge）
 ├── evaluate.py               # 评测脚本（对比三种检索的命中率）
@@ -451,6 +516,8 @@ ai/
 │   ├── test_api.py           #   HTTP 接口状态码、校验、跨客户端隔离
 │   ├── test_knowledge.py     #   客户端隔离 + 落盘恢复
 │   ├── test_vectorstore.py   #   双后端行为一致性
+│   ├── test_documents.py     #   切块与文档解析
+│   ├── test_retrieval.py     #   单一检索路径 + 依赖方向约束
 │   └── test_retrieval_quality.py  # 检索质量回归（slow，需本地模型）
 ├── pytest.ini                # pytest 配置
 ├── Dockerfile                # 容器构建（两阶段、非 root、健康检查）
