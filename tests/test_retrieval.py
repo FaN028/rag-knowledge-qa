@@ -93,6 +93,53 @@ def test_coarse_limit_comes_from_config(no_encoder, no_rerank):
     assert record[0][1] == config.RERANK_TOP_N
 
 
+# ---------------- 多批语料：一次粗排 + 一次精排 ----------------
+
+def test_retrieve_many_reranks_all_groups_in_one_call(monkeypatch, no_encoder):
+    """知识库与记忆两批候选，只该让 cross-encoder 跑一遍。"""
+    ranker = FakeRanker([0.1, 0.9, 0.5, 0.2, 0.8, 0.4])
+    monkeypatch.setattr(embedding, "get_reranker", lambda: ranker)
+
+    memory_hits, kb_hits = retrieval.retrieve_many(
+        "问题",
+        [fake_searcher(), fake_searcher()],
+        query_vector=[0.0],
+        top_k=2,
+    )
+
+    assert ranker.calls == 1
+    assert memory_hits == ["片段乙", "片段丙"]
+    assert kb_hits == ["片段乙", "片段丙"]
+
+
+def test_retrieve_many_keeps_groups_independent(monkeypatch, no_encoder):
+    """不同语料各自取 top_k，不互相挤占名额。"""
+    ranker = FakeRanker([0.9, 0.8, 0.7, 0.1, 0.2, 0.3])
+    monkeypatch.setattr(embedding, "get_reranker", lambda: ranker)
+
+    memory_hits, kb_hits = retrieval.retrieve_many(
+        "问题",
+        [fake_searcher(), fake_searcher(["文档一", "文档二", "文档三"])],
+        query_vector=[0.0],
+        top_k=1,
+    )
+
+    assert memory_hits == ["片段甲"]      # 高分的一组先出现，但只占自己的名额
+    assert kb_hits == ["文档三"]          # 另一组最低分也能拿到 1 个
+
+
+def test_retrieve_many_tolerates_missing_searcher(no_encoder, no_rerank):
+    """某一路没配置（比如记忆库为空）时，另一路照常出结果。"""
+    hits = retrieval.retrieve_many(
+        "问题",
+        [None, fake_searcher()],
+        query_vector=[0.0],
+        top_k=2,
+    )
+
+    assert hits == [[], ["片段甲", "片段乙"]]
+
+
 # ---------------- 只 encode 一次 ----------------
 
 def test_passed_vector_skips_encoding(no_encoder, no_rerank):

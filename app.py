@@ -199,21 +199,23 @@ def main() -> None:
         return
 
     # —— 知识库模式 ——
-    # 记忆要在"存入本句"之前查：先存再查的话，本句与自己的相似度是 1.0，
+    # 记忆与知识库两批候选来自不同语料，但 query 是同一个，所以拼成一批
+    # 只做一次粗排 + 一次精排；分两次调要付两遍 cross-encoder 的编码开销。
+    # 记忆必须在"存入本句"之前查：先存再查的话，本句与自己的相似度是 1.0，
     # 每次都会占掉一个召回名额，等于少检索一条真实的历史。
-    memory_context, _ = retrieval.build_context(
+    memory_hits, kb_hits = retrieval.retrieve_many(
         prompt,
-        st.session_state.memory.search,
+        [st.session_state.memory.search, st.session_state.kb.search],
         query_vector=query_vector,
+    )
+    memory_context = retrieval.format_context(
+        memory_hits,
         instruction=retrieval.MEMORY_INSTRUCTION,
     )
     st.session_state.memory.add([prompt], [query_vector])
 
-    context, cited = retrieval.build_context(
-        prompt,
-        st.session_state.kb.search,
-        query_vector=query_vector,
-    )
+    context = retrieval.format_context(kb_hits)
+    cited = kb_hits
 
     if memory_context:
         system_prompt = system_prompt + "\n\n" + memory_context

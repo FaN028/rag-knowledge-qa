@@ -19,7 +19,7 @@
 - **HTTP 接口服务** —— 以 FastAPI 暴露 `POST /chat`、`POST /knowledge` 等接口，同一套调度逻辑可供任意前端调用
 - **多客户端隔离与知识库持久化** —— 请求头 `X-Client-Id` 区分各自的知识库，数据落盘后服务重启自动恢复
 - **向量存储可切换** —— 一套接口两种后端：Chroma（HNSW 近似最近邻 + 持久化）/ NumPy（全量扫描，零依赖降级），换后端不动调用方代码
-- **单一检索链路** —— 界面、HTTP 接口、评测脚本调的是同一个 `retrieval.build_context()`，不存在「演示一套、线上另一套」；评测表里的命中率就是生产代码跑出来的
+- **单一检索链路** —— 界面、HTTP 接口、评测脚本调的是同一组 `retrieval.*`（`retrieve` / `retrieve_many` / `build_context`），不存在「演示一套、线上另一套」；评测表里的命中率就是生产代码跑出来的
 - **容器化运行** —— 两阶段构建、非 root 运行、`/health` 就绪探针、`docker compose` 一条命令拉起 API 与界面；镜像 5.4GB，已在本地完整实测（见「实测结果」）
 
 ## 🎬 效果演示
@@ -141,10 +141,10 @@ curl http://127.0.0.1:8000/knowledge -H "X-Client-Id: alice"
 ```
 app.py:187    query_vector = embedding.encode(prompt)        ← 一轮只 encode 一次
      ↓
-app.py:212    retrieval.build_context(prompt, kb.search)     ← 界面：会话内存库
+app.py:206    retrieval.retrieve_many(prompt, [memory.search, kb.search])
 tools.py:47   retrieval.build_context(query, store.search)   ← Agent 工具：绑定的库
      ↓
-retrieval.py:77  build_context()  →  retrieval.py:34  retrieve()
+retrieval.py:62  retrieve_many()  →  retrieval.py:34  retrieve()
      ↓  searcher(query_vector, config.RERANK_TOP_N)
 knowledge.py:122 KnowledgeBase.search()
      ↓
@@ -155,9 +155,9 @@ embedding.py:36  get_reranker() 有模型就精排，没有就按粗排顺序取
 
 三件事因此变得确定：
 
-- **只有一条检索实现**。`build_context` 只认「一个查询向量 + 一个 searcher 函数」，不关心底下是 NumPy 全量扫描还是 Chroma 的 HNSW。界面和 HTTP 调的是同一个函数，排序规则、并列分数的处理方式不可能再分叉。
+- **只有一条检索实现**。`retrieve_many` / `build_context` 只认「一个查询向量 + 一个 searcher 函数」，不关心底下是 NumPy 全量扫描还是 Chroma 的 HNSW。界面和 HTTP 调的是同一个函数，排序规则、并列分数的处理方式不可能再分叉。
 - **谁用哪个库由入口层决定**。界面绑一个随会话创建、不落盘的内存库（`app.py:137`），HTTP 按 `X-Client-Id` 绑各自的落盘库（`api.py:39`）。工具层只调 `knowledge.get_store()`，不需要知道 Streamlit 存在。
-- **记忆和知识库共用同一个查询向量，但用两份不同的提示词**（`MEMORY_INSTRUCTION` / `KB_INSTRUCTION`），不会再把往日对话标成「知识库资料」。
+- **记忆和知识库共用同一个查询向量，且只让精排模型跑一遍**：两批候选拼成一批喂给 cross-encoder 一次算完，再按各批自己的名额取 TOP_K（`retrieval.py:62`）；两份提示词分开（`MEMORY_INSTRUCTION` / `KB_INSTRUCTION`），不会再把往日对话标成「知识库资料」。
 
 上传文档时走另一条纯函数链：`ui.py:56` → `documents.extract_text()`（`documents.py:49`）→ `documents.chunk_text()`（`documents.py:22`）→ `embedding.encode()` → `KnowledgeBase.add()`。
 
